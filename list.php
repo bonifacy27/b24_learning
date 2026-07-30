@@ -114,6 +114,79 @@ function trainingTypeOptions(int $propertyId): array
     return $result;
 }
 
+function listPropertyValueSafe(
+    array $props,
+    int $iblockId,
+    int $elementId,
+    int $propId,
+    string $propCode,
+    array $options
+): string {
+    $property = $props[$propCode] ?? $props[$propId] ?? null;
+    if (is_array($property)) {
+        $enumValues = $property['VALUE_ENUM'] ?? null;
+        if ($enumValues !== null && $enumValues !== '' && $enumValues !== []) {
+            return is_array($enumValues) ? implode(', ', $enumValues) : (string)$enumValues;
+        }
+
+        $values = (array)($property['VALUE'] ?? []);
+        $labels = [];
+        foreach ($values as $value) {
+            if ($value !== null && $value !== '') $labels[] = $options[(int)$value] ?? (string)$value;
+        }
+        if ($labels) return implode(', ', $labels);
+    }
+
+    $labels = [];
+    $res = CIBlockElement::GetProperty($iblockId, $elementId, [], ['ID'=>$propId]);
+    while ($item = $res->Fetch()) {
+        if (!empty($item['VALUE_ENUM'])) {
+            $labels[] = (string)$item['VALUE_ENUM'];
+        } elseif ($item['VALUE'] !== null && $item['VALUE'] !== '') {
+            $labels[] = $options[(int)$item['VALUE']] ?? (string)$item['VALUE'];
+        }
+    }
+    return implode(', ', $labels);
+}
+
+function orgDepartmentById(int $departmentId): ?array
+{
+    static $cache = [];
+    if ($departmentId <= 0) return null;
+    if (array_key_exists($departmentId, $cache)) return $cache[$departmentId];
+
+    $res = CIBlockSection::GetList(
+        [],
+        ['ID'=>$departmentId],
+        false,
+        ['ID','NAME','IBLOCK_SECTION_ID','UF_HEAD']
+    );
+    $department = $res->Fetch();
+    return $cache[$departmentId] = ($department ?: null);
+}
+
+function orgStructureManagerId(array $departmentIds, int $employeeId): int
+{
+    foreach ($departmentIds as $departmentId) {
+        $visited = [];
+        while ($departmentId > 0 && empty($visited[$departmentId])) {
+            $visited[$departmentId] = true;
+            $department = orgDepartmentById($departmentId);
+            if (!$department) break;
+
+            $head = $department['UF_HEAD'] ?? 0;
+            if (is_array($head)) $head = reset($head);
+            $headId = (int)$head;
+            if ($headId > 0 && $headId !== $employeeId) return $headId;
+
+            // Если сотрудник сам возглавляет подразделение или руководитель не
+            // указан, продолжаем поиск вверх по оргструктуре портала.
+            $departmentId = (int)($department['IBLOCK_SECTION_ID'] ?? 0);
+        }
+    }
+    return 0;
+}
+
 function exportUserData($userId): array
 {
     static $cache = [];
@@ -126,16 +199,13 @@ function exportUserData($userId): array
 
     $departmentIds = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
     $departmentNames = [];
-    if ($departmentIds) {
-        $sections = CIBlockSection::GetList(['SORT'=>'ASC'], ['ID'=>$departmentIds], false, ['ID','NAME']);
-        while ($section = $sections->Fetch()) $departmentNames[] = $section['NAME'];
+    foreach ($departmentIds as $departmentId) {
+        $department = orgDepartmentById($departmentId);
+        if ($department) $departmentNames[] = (string)$department['NAME'];
     }
 
-    $managerName = '';
-    if ($departmentIds && Loader::includeModule('intranet')) {
-        $managerId = (int)CIntranetUtils::GetDepartmentManagerID(reset($departmentIds));
-        if ($managerId > 0) $managerName = userNameById($managerId);
-    }
+    $managerId = orgStructureManagerId($departmentIds, $userId);
+    $managerName = $managerId > 0 ? userNameById($managerId) : '';
 
     return $cache[$userId] = [
         'fio' => userNameById($userId),
@@ -291,7 +361,7 @@ if ($isExport) {
         $elementId = (int)$fields['ID'];
         $employeeId = propValueSafe($props, $IBLOCK_ID, $elementId, 3000, $PROP_MAP[3000]['code']);
         $userData = exportUserData($employeeId);
-        $type = propValueSafe($props, $IBLOCK_ID, $elementId, 3010, $PROP_MAP[3010]['code']);
+        $type = listPropertyValueSafe($props, $IBLOCK_ID, $elementId, 3010, $PROP_MAP[3010]['code'], $trainingTypes);
         $topic = propValueSafe($props, $IBLOCK_ID, $elementId, 3002, $PROP_MAP[3002]['code']);
         $city = propValueSafe($props, $IBLOCK_ID, $elementId, 3017, $PROP_MAP[3017]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3062, $PROP_MAP[3062]['code']);
         $start = propValueSafe($props, $IBLOCK_ID, $elementId, 3016, $PROP_MAP[3016]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3004, $PROP_MAP[3004]['code']);
@@ -401,7 +471,7 @@ if ($isExport) {
     $v3002 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3002, $PROP_MAP[3002]['code']);
     $v3008 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3008, $PROP_MAP[3008]['code']);
     $v3009 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3009, $PROP_MAP[3009]['code']);
-    $v3010 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3010, $PROP_MAP[3010]['code']);
+    $v3010 = listPropertyValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3010, $PROP_MAP[3010]['code'], $trainingTypes);
     $v3017 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3017, $PROP_MAP[3017]['code']);
     $v3062 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3062, $PROP_MAP[3062]['code']);
     $v3016 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3016, $PROP_MAP[3016]['code']);
