@@ -36,7 +36,7 @@ const PID_GOROD_OBUCHENIYA_WANT = 3062; // ➕ ДОРАБОТКА
 const TIP_VNUTRENNEE = 6407;
 const TIP_VNESHNEE   = 6408;
 
-const WORKFLOW_TEMPLATE_ID = 1276;
+const WORKFLOW_TEMPLATE_ID = 1355;
 
 require($_SERVER['DOCUMENT_ROOT'].'/bitrix/header.php');
 
