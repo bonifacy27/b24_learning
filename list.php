@@ -546,7 +546,7 @@ if ($isExport) {
         }
     }
 
-    $openUrl = "/workgroups/group/225/lists/{$IBLOCK_ID}/element/0/{$f['ID']}/?list_section_id=";
+    $openUrl = "/forms/learning/view.php?id=".(int)$f['ID'];
 ?>
 <tr>
   <td><?= (int)$f['ID'] ?></td>
