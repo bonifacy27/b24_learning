@@ -71,6 +71,25 @@ function viewSectionName($value): string
     return $cache[$sectionId] = ($section ? (string)$section['NAME'] : '');
 }
 
+function viewEnumName($value): string
+{
+    static $cache = [];
+    $enumId = (int)$value;
+    if ($enumId <= 0) return '';
+    if (isset($cache[$enumId])) return $cache[$enumId];
+
+    $enum = CIBlockPropertyEnum::GetByID($enumId);
+    return $cache[$enumId] = ($enum ? (string)$enum['VALUE'] : '');
+}
+
+function viewPropertyIsUser(array $property): bool
+{
+    $userType = strtolower((string)($property['USER_TYPE'] ?? ''));
+    return (int)($property['ID'] ?? 0) === VIEW_EMPLOYEE_PROPERTY_ID
+        || $userType === 'employee'
+        || strpos($userType, 'user') !== false;
+}
+
 function viewPropertyHasValue(array $property): bool
 {
     $values = (array)($property['VALUE'] ?? []);
@@ -91,11 +110,10 @@ function viewPropertyHtml(array $property): string
         if (is_array($value)) $value = $value['TEXT'] ?? '';
         if ($value === null || trim((string)$value) === '') continue;
 
-        if ((int)($property['ID'] ?? 0) === VIEW_EMPLOYEE_PROPERTY_ID
-            || strtolower((string)($property['USER_TYPE'] ?? '')) === 'employee') {
-            $displayValue = viewUserName($value);
+        if (viewPropertyIsUser($property)) {
+            $displayValue = viewUserName($value) ?: $value;
         } elseif (($property['PROPERTY_TYPE'] ?? '') === 'L') {
-            $displayValue = $enumValues[$index] ?? $enumValues[0] ?? $value;
+            $displayValue = ($enumValues[$index] ?? $enumValues[0] ?? viewEnumName($value)) ?: $value;
         } elseif (($property['PROPERTY_TYPE'] ?? '') === 'E') {
             $displayValue = viewElementName($value) ?: $value;
         } elseif (($property['PROPERTY_TYPE'] ?? '') === 'G') {
@@ -131,7 +149,9 @@ if ($requestId > 0) {
         ],
         false,
         false,
-        ['ID', 'NAME', 'DATE_CREATE', 'CREATED_BY']
+        // IBLOCK_ID необходим GetProperties(), чтобы загрузить все свойства
+        // элемента, включая пользовательские поля списка PROPERTY_*.
+        ['ID', 'IBLOCK_ID', 'NAME', 'DATE_CREATE', 'CREATED_BY']
     );
     $requestElement = $res->GetNextElement();
 }
@@ -146,7 +166,7 @@ if ($requestId > 0) {
   <?php else: ?>
     <?php
       $fields = $requestElement->GetFields();
-      $properties = $requestElement->GetProperties(['sort'=>'asc', 'id'=>'asc']);
+      $properties = $requestElement->GetProperties(['SORT'=>'ASC', 'ID'=>'ASC'], []);
       $APPLICATION->SetTitle('Заявка на обучение №'.(int)$fields['ID']);
     ?>
     <h2 class="mb-3">Заявка на обучение №<?= (int)$fields['ID'] ?></h2>
