@@ -142,7 +142,7 @@ if ($isPost && check_bitrix_sessid()) {
     $budget                 = trim((string)$request->getPost('budget'));
     $justification          = trim((string)$request->getPost('justification'));
 
-    $cityFinal = ($citySelect === 'Другой') ? $cityOther : $citySelect;
+    $cityFinal = $trainingType === 'vnutrennee' ? '' : (($citySelect === 'Другой') ? $cityOther : $citySelect);
 
     // Период обучения: для внутреннего обучения не требуется
     $dateFromSave = '';
@@ -154,10 +154,10 @@ if ($isPost && check_bitrix_sessid()) {
     }
 
     // === Валидация ===
-    if (!in_array($citySelect, ['Санкт-Петербург','Москва','Другой',''], true)) {
+    if ($trainingType !== 'vnutrennee' && !in_array($citySelect, ['Санкт-Петербург','Москва','Другой'], true)) {
         $errors[] = 'Неверный город.';
     }
-    if ($citySelect === 'Другой' && !$cityOther) $errors[] = 'Укажите город.';
+    if ($trainingType !== 'vnutrennee' && $citySelect === 'Другой' && !$cityOther) $errors[] = 'Укажите город.';
     if (!in_array($trainingType, ['vneshnee','vnutrennee'], true)) {
         $errors[] = 'Выберите тип обучения.';
     }
@@ -330,7 +330,7 @@ CJSCore::Init(['ajax','jquery','date','ui']);
     </div>
 
     <!-- Город -->
-    <div class="form-group">
+    <div class="form-group" id="employee_city_wrap" style="<?= $trainingType==='vnutrennee'?'display:none':'' ?>">
       <label>Город сотрудника *</label>
       <select class="form-control" name="city_select" id="city_select" required>
         <option value="" <?= $citySelect===''?'selected':'' ?>>— выберите —</option>
@@ -403,7 +403,7 @@ CJSCore::Init(['ajax','jquery','date','ui']);
 
     <!-- Обоснование -->
     <div class="form-group" id="justify_wrap" style="<?= ($trainingType==='vnutrennee' || $budget!=='нет')?'display:none':'' ?>">
-      <label>Обоснование *</label>
+      <label>Обоснуйте, почему вам необходимо пройти данное обучение *</label>
       <textarea class="form-control" rows="3" name="justification"><?= h($justification) ?></textarea>
     </div>
 
@@ -424,6 +424,7 @@ document.addEventListener('DOMContentLoaded', function(){
 
   // Тип обучения
   var trainingTypeSelect = document.getElementById('training_type');
+  var employeeCityWrap = document.getElementById('employee_city_wrap');
   var topicWrap = document.getElementById('topic_wrap');
   var vidObucheniyaWrap = document.getElementById('vid_obucheniya_wrap');
   var gorodObucheniyaWrap = document.getElementById('gorod_obucheniya_wrap');
@@ -460,6 +461,8 @@ document.addEventListener('DOMContentLoaded', function(){
   function updateForm() {
     var type = trainingTypeSelect.value;
     if (type === 'vnutrennee') {
+      if (employeeCityWrap) employeeCityWrap.style.display = 'none';
+      if (citySelect) citySelect.required = false;
       var options = '<option value="">— выберите —</option>';
       <?php foreach ($courses as $id => $name): ?>
         options += '<option value="<?= (int)$id ?>"><?= CUtil::JSEscape($name) ?></option>';
@@ -502,6 +505,8 @@ document.addEventListener('DOMContentLoaded', function(){
         }
       }
     } else {
+      if (employeeCityWrap) employeeCityWrap.style.display = 'block';
+      if (citySelect) citySelect.required = true;
       topicWrap.innerHTML = `
         <label>Тема обучения *</label>
         <textarea class="form-control" rows="3" name="topic"><?= h($topic) ?></textarea>

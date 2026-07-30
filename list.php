@@ -31,6 +31,7 @@ $PROP_MAP = [
     3005 => ['code' => 'DATA_OKONCHANIYA',    'title' => 'Дата окончания'],
     3008 => ['code' => 'STATUS',              'title' => 'Статус'],
     3009 => ['code' => 'ISTORIYA',            'title' => 'История заявки'],
+    3010 => ['code' => 'TIP_OBUCHENIYA',       'title' => 'Тип обучения'],
     3062 => ['code' => 'GOROD_OBUCHENIYA_WANT','title' => 'Город обучения (желаемый)'],
     3017 => ['code' => 'GOROD_OBUCHENIYA',    'title' => 'Город обучения'],
     3016 => ['code' => 'DATA_NACHALA_OBUCHENIYA', 'title' => 'Дата начала обучения'],
@@ -101,6 +102,53 @@ function propValueSafe(array $props, int $iblockId, int $elementId, int $propId,
     $vals = [];
     while ($ar = $res->Fetch()) { if ($ar["VALUE"] !== null && $ar["VALUE"] !== "") $vals[] = $ar["VALUE"]; }
     return $vals ? (count($vals)>1 ? implode(", ", $vals) : $vals[0]) : '';
+}
+
+function trainingTypeOptions(int $propertyId): array
+{
+    $result = [];
+    $res = CIBlockPropertyEnum::GetList(['SORT' => 'ASC', 'VALUE' => 'ASC'], ['PROPERTY_ID' => $propertyId]);
+    while ($item = $res->Fetch()) {
+        $result[(int)$item['ID']] = (string)$item['VALUE'];
+    }
+    return $result;
+}
+
+function exportUserData($userId): array
+{
+    static $cache = [];
+    $userId = (int)$userId;
+    if ($userId <= 0) return ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
+    if (isset($cache[$userId])) return $cache[$userId];
+
+    $user = CUser::GetByID($userId)->Fetch();
+    if (!$user) return $cache[$userId] = ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
+
+    $departmentIds = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
+    $departmentNames = [];
+    if ($departmentIds) {
+        $sections = CIBlockSection::GetList(['SORT'=>'ASC'], ['ID'=>$departmentIds], false, ['ID','NAME']);
+        while ($section = $sections->Fetch()) $departmentNames[] = $section['NAME'];
+    }
+
+    $managerName = '';
+    if ($departmentIds && Loader::includeModule('intranet')) {
+        $managerId = (int)CIntranetUtils::GetDepartmentManagerID(reset($departmentIds));
+        if ($managerId > 0) $managerName = userNameById($managerId);
+    }
+
+    return $cache[$userId] = [
+        'fio' => userNameById($userId),
+        'position' => (string)($user['WORK_POSITION'] ?? ''),
+        'department' => implode(', ', $departmentNames),
+        'email' => (string)($user['EMAIL'] ?? ''),
+        'manager' => $managerName,
+    ];
+}
+
+function excelCell($value): string
+{
+    return '<td>'.htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</td>';
 }
 
 /* ------------------------- Бизнес-процессы ------------------------- */
@@ -177,6 +225,7 @@ $allowedSort = [
     'start'     => 'PROPERTY_3016',
     'end'       => 'PROPERTY_3019',
     'status'    => 'PROPERTY_3008',
+    'type'      => 'PROPERTY_3010',
 ];
 
 $sortKey = isset($_GET['sort'], $allowedSort[$_GET['sort']]) ? $_GET['sort'] : 'id';
@@ -200,6 +249,11 @@ $filter = [
 ];
 
 $q = trim((string)($_GET['q'] ?? ''));
+$trainingTypes = trainingTypeOptions(3010);
+$trainingTypeFilter = (int)($_GET['training_type'] ?? 0);
+if ($trainingTypeFilter > 0 && isset($trainingTypes[$trainingTypeFilter])) {
+    $filter['PROPERTY_3010'] = $trainingTypeFilter;
+}
 if ($q !== '') {
     $filter[] = [
         "LOGIC" => "OR",
@@ -214,13 +268,43 @@ if ($q !== '') {
 
 $arSelect = ["ID", "NAME"];
 
+$isExport = isset($_GET['export']) && $_GET['export'] === 'excel';
 $rsItems = CIBlockElement::GetList(
     $order,
     $filter,
     false,
-    ["nPageSize" => 50],
+    $isExport ? false : ["nPageSize" => 50],
     $arSelect
 );
+
+if ($isExport) {
+    $APPLICATION->RestartBuffer();
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="learning_requests_'.date('Y-m-d').'.xls"');
+    echo "\xEF\xBB\xBF";
+    echo '<html><head><meta charset="UTF-8"></head><body><table border="1"><thead><tr>';
+    foreach (['ID','Тип обучения','Тема обучения','Город обучения','Дата начала','Дата окончания','ФИО сотрудника','Должность','Подразделение','Адрес эл. почты','ФИО руководителя','Статус'] as $heading) echo excelCell($heading);
+    echo '</tr></thead><tbody>';
+    while ($ob = $rsItems->GetNextElement()) {
+        $fields = $ob->GetFields();
+        $props = $ob->GetProperties();
+        $elementId = (int)$fields['ID'];
+        $employeeId = propValueSafe($props, $IBLOCK_ID, $elementId, 3000, $PROP_MAP[3000]['code']);
+        $userData = exportUserData($employeeId);
+        $type = propValueSafe($props, $IBLOCK_ID, $elementId, 3010, $PROP_MAP[3010]['code']);
+        $topic = propValueSafe($props, $IBLOCK_ID, $elementId, 3002, $PROP_MAP[3002]['code']);
+        $city = propValueSafe($props, $IBLOCK_ID, $elementId, 3017, $PROP_MAP[3017]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3062, $PROP_MAP[3062]['code']);
+        $start = propValueSafe($props, $IBLOCK_ID, $elementId, 3016, $PROP_MAP[3016]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3004, $PROP_MAP[3004]['code']);
+        $end = propValueSafe($props, $IBLOCK_ID, $elementId, 3019, $PROP_MAP[3019]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3005, $PROP_MAP[3005]['code']);
+        $statusId = propValueSafe($props, $IBLOCK_ID, $elementId, 3008, $PROP_MAP[3008]['code']);
+        $status = statusInfoById($statusId, $IBLOCK_STATUS)['NAME'];
+        echo '<tr>'.excelCell($elementId).excelCell($type).excelCell($topic).excelCell($city).excelCell($start).excelCell($end)
+            .excelCell($userData['fio']).excelCell($userData['position']).excelCell($userData['department'])
+            .excelCell($userData['email']).excelCell($userData['manager']).excelCell($status).'</tr>';
+    }
+    echo '</tbody></table></body></html>';
+    die();
+}
 ?>
 <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
 
@@ -256,16 +340,23 @@ $rsItems = CIBlockElement::GetList(
   <h2 class="mb-3">Заявки на обучение</h2>
   <p class="mb-3">Список ваших заявок на обучение. Актуальный статус согласования отображается в поле «Статус».</p>
 
-  <div class="d-flex align-items-center mb-3">
+  <div class="d-flex align-items-center mb-3 flex-wrap">
     <a href="/forms/learning/create_request.php" class="btn btn-success mr-3">Создать новую заявку</a>
 
     <form method="get" class="form-inline">
       <input type="hidden" name="sort" value="<?= h($sortKey) ?>">
       <input type="hidden" name="dir"  value="<?= h(strtolower($dir)) ?>">
       <input type="text" name="q" value="<?= h($q) ?>" class="form-control mr-2" placeholder="Поиск по ФИО, городу, теме">
+      <select name="training_type" class="form-control mr-2">
+        <option value="">Все типы обучения</option>
+        <?php foreach ($trainingTypes as $typeId => $typeName): ?>
+          <option value="<?= (int)$typeId ?>" <?= $trainingTypeFilter === (int)$typeId ? 'selected' : '' ?>><?= h($typeName) ?></option>
+        <?php endforeach; ?>
+      </select>
       <button type="submit" class="btn btn-primary mr-2">Найти</button>
       <a href="<?= h($APPLICATION->GetCurPage()) ?>" class="btn btn-secondary">Сброс</a>
     </form>
+    <a href="?<?= h(qs(['export'=>'excel'], ['q','training_type','sort','dir'])) ?>" class="btn btn-outline-success ml-2">Выгрузить в Excel</a>
   </div>
 
 <?php if ($rsItems->SelectedRowsCount() <= 0): ?>
@@ -277,7 +368,7 @@ $rsItems = CIBlockElement::GetList(
   $dirOpposite = ($dir === 'ASC') ? 'DESC' : 'ASC';
   $makeSortLink = function(string $key, string $title) use ($sortKey, $dir, $dirOpposite) {
     $isActive = ($sortKey === $key);
-    $url = '?'.qs(['sort' => $key, 'dir' => $isActive ? $dirOpposite : 'ASC'], ['q']);
+    $url = '?'.qs(['sort' => $key, 'dir' => $isActive ? $dirOpposite : 'ASC'], ['q','training_type']);
     $caret = '';
     if ($isActive) $caret = $dir === 'ASC' ? '▲' : '▼';
     return '<a href="'.h($url).'" class="sort-link">'.h($title).($caret ? '<span class="sort-caret">'.$caret.'</span>' : '').'</a>';
@@ -290,6 +381,7 @@ $rsItems = CIBlockElement::GetList(
       <tr>
         <th><?= $makeSortLink('id',       'ID') ?></th>
         <th><?= $makeSortLink('employee', 'ФИО сотрудника') ?></th>
+        <th><?= $makeSortLink('type',     'Тип обучения') ?></th>
         <th><?= $makeSortLink('city',     'Город обучения') ?></th>
         <th><?= $makeSortLink('topic',    'Тема обучения') ?></th>
         <th><?= $makeSortLink('start',    'Дата начала') ?></th>
@@ -309,6 +401,7 @@ $rsItems = CIBlockElement::GetList(
     $v3002 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3002, $PROP_MAP[3002]['code']);
     $v3008 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3008, $PROP_MAP[3008]['code']);
     $v3009 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3009, $PROP_MAP[3009]['code']);
+    $v3010 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3010, $PROP_MAP[3010]['code']);
     $v3017 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3017, $PROP_MAP[3017]['code']);
     $v3062 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3062, $PROP_MAP[3062]['code']);
     $v3016 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3016, $PROP_MAP[3016]['code']);
@@ -352,6 +445,7 @@ $rsItems = CIBlockElement::GetList(
 <tr>
   <td><?= (int)$f['ID'] ?></td>
   <td><?= h($employeeName) ?></td>
+  <td><?= h($v3010) ?></td>
   <td><?= h($cityToShow) ?></td>
   <td><?= h($v3002) ?></td>
   <td><?= h($dateStartToShow) ?></td>
