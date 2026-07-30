@@ -57,7 +57,7 @@ function qs(array $params, array $keep = [])
 
 function userNameById($userId)
 {
-    $userId = (int)$userId;
+    $userId = normalizeUserId($userId);
     if ($userId <= 0) return '';
     $rsUser = CUser::GetByID($userId);
     if ($arUser = $rsUser->Fetch()) {
@@ -65,6 +65,13 @@ function userNameById($userId)
         return $name ?: $arUser["LOGIN"];
     }
     return '';
+}
+
+function normalizeUserId($value): int
+{
+    if (is_array($value)) $value = reset($value);
+    if (is_int($value) || (is_string($value) && ctype_digit($value))) return (int)$value;
+    return preg_match('/(\d+)\s*$/', (string)$value, $matches) ? (int)$matches[1] : 0;
 }
 
 function statusInfoById($statusId, $iblockStatus)
@@ -187,14 +194,41 @@ function orgStructureManagerId(array $departmentIds, int $employeeId): int
     return 0;
 }
 
+function portalManagerId(array $user): int
+{
+    if (!CModule::IncludeModule('intranet')) return 0;
+
+    $departments = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
+    if (!$departments) return 0;
+
+    // Штатный метод Bitrix учитывает оргструктуру портала и поднимается по ней
+    // при поиске непосредственного руководителя сотрудника.
+    $managers = CIntranetUtils::GetDepartmentManager($departments, (int)$user['ID'], true);
+    if (is_array($managers)) {
+        foreach ($managers as $manager) {
+            $managerId = normalizeUserId(is_array($manager) ? ($manager['ID'] ?? 0) : $manager);
+            if ($managerId > 0 && $managerId !== (int)$user['ID']) return $managerId;
+        }
+    }
+    return 0;
+}
+
 function exportUserData($userId): array
 {
     static $cache = [];
-    $userId = (int)$userId;
+    $userId = normalizeUserId($userId);
     if ($userId <= 0) return ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
     if (isset($cache[$userId])) return $cache[$userId];
 
-    $user = CUser::GetByID($userId)->Fetch();
+    $by = 'id';
+    $order = 'asc';
+    $dbUser = CUser::GetList(
+        $by,
+        $order,
+        ['ID_EQUAL_EXACT'=>$userId],
+        ['FIELDS'=>['ID','LOGIN','NAME','LAST_NAME','SECOND_NAME','EMAIL','WORK_POSITION'], 'SELECT'=>['UF_*']]
+    );
+    $user = $dbUser->Fetch();
     if (!$user) return $cache[$userId] = ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
 
     $departmentIds = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
@@ -204,7 +238,8 @@ function exportUserData($userId): array
         if ($department) $departmentNames[] = (string)$department['NAME'];
     }
 
-    $managerId = orgStructureManagerId($departmentIds, $userId);
+    $managerId = portalManagerId($user);
+    if ($managerId <= 0) $managerId = orgStructureManagerId($departmentIds, $userId);
     $managerName = $managerId > 0 ? userNameById($managerId) : '';
 
     return $cache[$userId] = [
@@ -359,7 +394,7 @@ if ($isExport) {
         $fields = $ob->GetFields();
         $props = $ob->GetProperties();
         $elementId = (int)$fields['ID'];
-        $employeeId = propValueSafe($props, $IBLOCK_ID, $elementId, 3000, $PROP_MAP[3000]['code']);
+        $employeeId = normalizeUserId(propValueSafe($props, $IBLOCK_ID, $elementId, 3000, $PROP_MAP[3000]['code']));
         $userData = exportUserData($employeeId);
         $type = listPropertyValueSafe($props, $IBLOCK_ID, $elementId, 3010, $PROP_MAP[3010]['code'], $trainingTypes);
         $topic = propValueSafe($props, $IBLOCK_ID, $elementId, 3002, $PROP_MAP[3002]['code']);
@@ -479,7 +514,8 @@ if ($isExport) {
     $v3004 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3004, $PROP_MAP[3004]['code']);
     $v3005 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3005, $PROP_MAP[3005]['code']);
 
-    $employeeName = $v3000 ? userNameById($v3000) : '';
+    $employeeId = normalizeUserId($v3000);
+    $employeeName = $employeeId > 0 ? userNameById($employeeId) : '';
     $cityToShow = $v3017 ?: $v3062;
     $dateStartToShow = $v3016 ?: $v3004;
     $dateEndToShow   = $v3019 ?: $v3005;
