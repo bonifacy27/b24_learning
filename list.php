@@ -31,6 +31,7 @@ $PROP_MAP = [
     3005 => ['code' => 'DATA_OKONCHANIYA',    'title' => 'Дата окончания'],
     3008 => ['code' => 'STATUS',              'title' => 'Статус'],
     3009 => ['code' => 'ISTORIYA',            'title' => 'История заявки'],
+    3010 => ['code' => 'TIP_OBUCHENIYA',       'title' => 'Тип обучения'],
     3062 => ['code' => 'GOROD_OBUCHENIYA_WANT','title' => 'Город обучения (желаемый)'],
     3017 => ['code' => 'GOROD_OBUCHENIYA',    'title' => 'Город обучения'],
     3016 => ['code' => 'DATA_NACHALA_OBUCHENIYA', 'title' => 'Дата начала обучения'],
@@ -56,7 +57,7 @@ function qs(array $params, array $keep = [])
 
 function userNameById($userId)
 {
-    $userId = (int)$userId;
+    $userId = normalizeUserId($userId);
     if ($userId <= 0) return '';
     $rsUser = CUser::GetByID($userId);
     if ($arUser = $rsUser->Fetch()) {
@@ -64,6 +65,13 @@ function userNameById($userId)
         return $name ?: $arUser["LOGIN"];
     }
     return '';
+}
+
+function normalizeUserId($value): int
+{
+    if (is_array($value)) $value = reset($value);
+    if (is_int($value) || (is_string($value) && ctype_digit($value))) return (int)$value;
+    return preg_match('/(\d+)\s*$/', (string)$value, $matches) ? (int)$matches[1] : 0;
 }
 
 function statusInfoById($statusId, $iblockStatus)
@@ -101,6 +109,151 @@ function propValueSafe(array $props, int $iblockId, int $elementId, int $propId,
     $vals = [];
     while ($ar = $res->Fetch()) { if ($ar["VALUE"] !== null && $ar["VALUE"] !== "") $vals[] = $ar["VALUE"]; }
     return $vals ? (count($vals)>1 ? implode(", ", $vals) : $vals[0]) : '';
+}
+
+function trainingTypeOptions(int $propertyId): array
+{
+    $result = [];
+    $res = CIBlockPropertyEnum::GetList(['SORT' => 'ASC', 'VALUE' => 'ASC'], ['PROPERTY_ID' => $propertyId]);
+    while ($item = $res->Fetch()) {
+        $result[(int)$item['ID']] = (string)$item['VALUE'];
+    }
+    return $result;
+}
+
+function listPropertyValueSafe(
+    array $props,
+    int $iblockId,
+    int $elementId,
+    int $propId,
+    string $propCode,
+    array $options
+): string {
+    $property = $props[$propCode] ?? $props[$propId] ?? null;
+    if (is_array($property)) {
+        $enumValues = $property['VALUE_ENUM'] ?? null;
+        if ($enumValues !== null && $enumValues !== '' && $enumValues !== []) {
+            return is_array($enumValues) ? implode(', ', $enumValues) : (string)$enumValues;
+        }
+
+        $values = (array)($property['VALUE'] ?? []);
+        $labels = [];
+        foreach ($values as $value) {
+            if ($value !== null && $value !== '') $labels[] = $options[(int)$value] ?? (string)$value;
+        }
+        if ($labels) return implode(', ', $labels);
+    }
+
+    $labels = [];
+    $res = CIBlockElement::GetProperty($iblockId, $elementId, [], ['ID'=>$propId]);
+    while ($item = $res->Fetch()) {
+        if (!empty($item['VALUE_ENUM'])) {
+            $labels[] = (string)$item['VALUE_ENUM'];
+        } elseif ($item['VALUE'] !== null && $item['VALUE'] !== '') {
+            $labels[] = $options[(int)$item['VALUE']] ?? (string)$item['VALUE'];
+        }
+    }
+    return implode(', ', $labels);
+}
+
+function orgDepartmentById(int $departmentId): ?array
+{
+    static $cache = [];
+    if ($departmentId <= 0) return null;
+    if (array_key_exists($departmentId, $cache)) return $cache[$departmentId];
+
+    $res = CIBlockSection::GetList(
+        [],
+        ['ID'=>$departmentId],
+        false,
+        ['ID','NAME','IBLOCK_SECTION_ID','UF_HEAD']
+    );
+    $department = $res->Fetch();
+    return $cache[$departmentId] = ($department ?: null);
+}
+
+function orgStructureManagerId(array $departmentIds, int $employeeId): int
+{
+    foreach ($departmentIds as $departmentId) {
+        $visited = [];
+        while ($departmentId > 0 && empty($visited[$departmentId])) {
+            $visited[$departmentId] = true;
+            $department = orgDepartmentById($departmentId);
+            if (!$department) break;
+
+            $head = $department['UF_HEAD'] ?? 0;
+            if (is_array($head)) $head = reset($head);
+            $headId = (int)$head;
+            if ($headId > 0 && $headId !== $employeeId) return $headId;
+
+            // Если сотрудник сам возглавляет подразделение или руководитель не
+            // указан, продолжаем поиск вверх по оргструктуре портала.
+            $departmentId = (int)($department['IBLOCK_SECTION_ID'] ?? 0);
+        }
+    }
+    return 0;
+}
+
+function portalManagerId(array $user): int
+{
+    if (!CModule::IncludeModule('intranet')) return 0;
+
+    $departments = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
+    if (!$departments) return 0;
+
+    // Штатный метод Bitrix учитывает оргструктуру портала и поднимается по ней
+    // при поиске непосредственного руководителя сотрудника.
+    $managers = CIntranetUtils::GetDepartmentManager($departments, (int)$user['ID'], true);
+    if (is_array($managers)) {
+        foreach ($managers as $manager) {
+            $managerId = normalizeUserId(is_array($manager) ? ($manager['ID'] ?? 0) : $manager);
+            if ($managerId > 0 && $managerId !== (int)$user['ID']) return $managerId;
+        }
+    }
+    return 0;
+}
+
+function exportUserData($userId): array
+{
+    static $cache = [];
+    $userId = normalizeUserId($userId);
+    if ($userId <= 0) return ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
+    if (isset($cache[$userId])) return $cache[$userId];
+
+    $by = 'id';
+    $order = 'asc';
+    $dbUser = CUser::GetList(
+        $by,
+        $order,
+        ['ID_EQUAL_EXACT'=>$userId],
+        ['FIELDS'=>['ID','LOGIN','NAME','LAST_NAME','SECOND_NAME','EMAIL','WORK_POSITION'], 'SELECT'=>['UF_*']]
+    );
+    $user = $dbUser->Fetch();
+    if (!$user) return $cache[$userId] = ['fio'=>'', 'position'=>'', 'department'=>'', 'email'=>'', 'manager'=>''];
+
+    $departmentIds = array_filter(array_map('intval', (array)($user['UF_DEPARTMENT'] ?? [])));
+    $departmentNames = [];
+    foreach ($departmentIds as $departmentId) {
+        $department = orgDepartmentById($departmentId);
+        if ($department) $departmentNames[] = (string)$department['NAME'];
+    }
+
+    $managerId = portalManagerId($user);
+    if ($managerId <= 0) $managerId = orgStructureManagerId($departmentIds, $userId);
+    $managerName = $managerId > 0 ? userNameById($managerId) : '';
+
+    return $cache[$userId] = [
+        'fio' => userNameById($userId),
+        'position' => (string)($user['WORK_POSITION'] ?? ''),
+        'department' => implode(', ', $departmentNames),
+        'email' => (string)($user['EMAIL'] ?? ''),
+        'manager' => $managerName,
+    ];
+}
+
+function excelCell($value): string
+{
+    return '<td>'.htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</td>';
 }
 
 /* ------------------------- Бизнес-процессы ------------------------- */
@@ -177,6 +330,7 @@ $allowedSort = [
     'start'     => 'PROPERTY_3016',
     'end'       => 'PROPERTY_3019',
     'status'    => 'PROPERTY_3008',
+    'type'      => 'PROPERTY_3010',
 ];
 
 $sortKey = isset($_GET['sort'], $allowedSort[$_GET['sort']]) ? $_GET['sort'] : 'id';
@@ -200,6 +354,11 @@ $filter = [
 ];
 
 $q = trim((string)($_GET['q'] ?? ''));
+$trainingTypes = trainingTypeOptions(3010);
+$trainingTypeFilter = (int)($_GET['training_type'] ?? 0);
+if ($trainingTypeFilter > 0 && isset($trainingTypes[$trainingTypeFilter])) {
+    $filter['PROPERTY_3010'] = $trainingTypeFilter;
+}
 if ($q !== '') {
     $filter[] = [
         "LOGIC" => "OR",
@@ -214,13 +373,43 @@ if ($q !== '') {
 
 $arSelect = ["ID", "NAME"];
 
+$isExport = isset($_GET['export']) && $_GET['export'] === 'excel';
 $rsItems = CIBlockElement::GetList(
     $order,
     $filter,
     false,
-    ["nPageSize" => 50],
+    $isExport ? false : ["nPageSize" => 50],
     $arSelect
 );
+
+if ($isExport) {
+    $APPLICATION->RestartBuffer();
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="learning_requests_'.date('Y-m-d').'.xls"');
+    echo "\xEF\xBB\xBF";
+    echo '<html><head><meta charset="UTF-8"></head><body><table border="1"><thead><tr>';
+    foreach (['ID','Тип обучения','Тема обучения','Город обучения','Дата начала','Дата окончания','ФИО сотрудника','Должность','Подразделение','Адрес эл. почты','ФИО руководителя','Статус'] as $heading) echo excelCell($heading);
+    echo '</tr></thead><tbody>';
+    while ($ob = $rsItems->GetNextElement()) {
+        $fields = $ob->GetFields();
+        $props = $ob->GetProperties();
+        $elementId = (int)$fields['ID'];
+        $employeeId = normalizeUserId(propValueSafe($props, $IBLOCK_ID, $elementId, 3000, $PROP_MAP[3000]['code']));
+        $userData = exportUserData($employeeId);
+        $type = listPropertyValueSafe($props, $IBLOCK_ID, $elementId, 3010, $PROP_MAP[3010]['code'], $trainingTypes);
+        $topic = propValueSafe($props, $IBLOCK_ID, $elementId, 3002, $PROP_MAP[3002]['code']);
+        $city = propValueSafe($props, $IBLOCK_ID, $elementId, 3017, $PROP_MAP[3017]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3062, $PROP_MAP[3062]['code']);
+        $start = propValueSafe($props, $IBLOCK_ID, $elementId, 3016, $PROP_MAP[3016]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3004, $PROP_MAP[3004]['code']);
+        $end = propValueSafe($props, $IBLOCK_ID, $elementId, 3019, $PROP_MAP[3019]['code']) ?: propValueSafe($props, $IBLOCK_ID, $elementId, 3005, $PROP_MAP[3005]['code']);
+        $statusId = propValueSafe($props, $IBLOCK_ID, $elementId, 3008, $PROP_MAP[3008]['code']);
+        $status = statusInfoById($statusId, $IBLOCK_STATUS)['NAME'];
+        echo '<tr>'.excelCell($elementId).excelCell($type).excelCell($topic).excelCell($city).excelCell($start).excelCell($end)
+            .excelCell($userData['fio']).excelCell($userData['position']).excelCell($userData['department'])
+            .excelCell($userData['email']).excelCell($userData['manager']).excelCell($status).'</tr>';
+    }
+    echo '</tbody></table></body></html>';
+    die();
+}
 ?>
 <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
 
@@ -256,16 +445,23 @@ $rsItems = CIBlockElement::GetList(
   <h2 class="mb-3">Заявки на обучение</h2>
   <p class="mb-3">Список ваших заявок на обучение. Актуальный статус согласования отображается в поле «Статус».</p>
 
-  <div class="d-flex align-items-center mb-3">
+  <div class="d-flex align-items-center mb-3 flex-wrap">
     <a href="/forms/learning/create_request.php" class="btn btn-success mr-3">Создать новую заявку</a>
 
     <form method="get" class="form-inline">
       <input type="hidden" name="sort" value="<?= h($sortKey) ?>">
       <input type="hidden" name="dir"  value="<?= h(strtolower($dir)) ?>">
       <input type="text" name="q" value="<?= h($q) ?>" class="form-control mr-2" placeholder="Поиск по ФИО, городу, теме">
+      <select name="training_type" class="form-control mr-2">
+        <option value="">Все типы обучения</option>
+        <?php foreach ($trainingTypes as $typeId => $typeName): ?>
+          <option value="<?= (int)$typeId ?>" <?= $trainingTypeFilter === (int)$typeId ? 'selected' : '' ?>><?= h($typeName) ?></option>
+        <?php endforeach; ?>
+      </select>
       <button type="submit" class="btn btn-primary mr-2">Найти</button>
       <a href="<?= h($APPLICATION->GetCurPage()) ?>" class="btn btn-secondary">Сброс</a>
     </form>
+    <a href="?<?= h(qs(['export'=>'excel'], ['q','training_type','sort','dir'])) ?>" class="btn btn-outline-success ml-2">Выгрузить в Excel</a>
   </div>
 
 <?php if ($rsItems->SelectedRowsCount() <= 0): ?>
@@ -277,7 +473,7 @@ $rsItems = CIBlockElement::GetList(
   $dirOpposite = ($dir === 'ASC') ? 'DESC' : 'ASC';
   $makeSortLink = function(string $key, string $title) use ($sortKey, $dir, $dirOpposite) {
     $isActive = ($sortKey === $key);
-    $url = '?'.qs(['sort' => $key, 'dir' => $isActive ? $dirOpposite : 'ASC'], ['q']);
+    $url = '?'.qs(['sort' => $key, 'dir' => $isActive ? $dirOpposite : 'ASC'], ['q','training_type']);
     $caret = '';
     if ($isActive) $caret = $dir === 'ASC' ? '▲' : '▼';
     return '<a href="'.h($url).'" class="sort-link">'.h($title).($caret ? '<span class="sort-caret">'.$caret.'</span>' : '').'</a>';
@@ -290,6 +486,7 @@ $rsItems = CIBlockElement::GetList(
       <tr>
         <th><?= $makeSortLink('id',       'ID') ?></th>
         <th><?= $makeSortLink('employee', 'ФИО сотрудника') ?></th>
+        <th><?= $makeSortLink('type',     'Тип обучения') ?></th>
         <th><?= $makeSortLink('city',     'Город обучения') ?></th>
         <th><?= $makeSortLink('topic',    'Тема обучения') ?></th>
         <th><?= $makeSortLink('start',    'Дата начала') ?></th>
@@ -309,6 +506,7 @@ $rsItems = CIBlockElement::GetList(
     $v3002 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3002, $PROP_MAP[3002]['code']);
     $v3008 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3008, $PROP_MAP[3008]['code']);
     $v3009 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3009, $PROP_MAP[3009]['code']);
+    $v3010 = listPropertyValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3010, $PROP_MAP[3010]['code'], $trainingTypes);
     $v3017 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3017, $PROP_MAP[3017]['code']);
     $v3062 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3062, $PROP_MAP[3062]['code']);
     $v3016 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3016, $PROP_MAP[3016]['code']);
@@ -316,7 +514,8 @@ $rsItems = CIBlockElement::GetList(
     $v3004 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3004, $PROP_MAP[3004]['code']);
     $v3005 = propValueSafe($p, $IBLOCK_ID, (int)$f['ID'], 3005, $PROP_MAP[3005]['code']);
 
-    $employeeName = $v3000 ? userNameById($v3000) : '';
+    $employeeId = normalizeUserId($v3000);
+    $employeeName = $employeeId > 0 ? userNameById($employeeId) : '';
     $cityToShow = $v3017 ?: $v3062;
     $dateStartToShow = $v3016 ?: $v3004;
     $dateEndToShow   = $v3019 ?: $v3005;
@@ -347,11 +546,12 @@ $rsItems = CIBlockElement::GetList(
         }
     }
 
-    $openUrl = "/workgroups/group/225/lists/{$IBLOCK_ID}/element/0/{$f['ID']}/?list_section_id=";
+    $openUrl = "/forms/learning/view.php?id=".(int)$f['ID'];
 ?>
 <tr>
   <td><?= (int)$f['ID'] ?></td>
   <td><?= h($employeeName) ?></td>
+  <td><?= h($v3010) ?></td>
   <td><?= h($cityToShow) ?></td>
   <td><?= h($v3002) ?></td>
   <td><?= h($dateStartToShow) ?></td>
